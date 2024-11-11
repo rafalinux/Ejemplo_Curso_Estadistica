@@ -1,0 +1,323 @@
+---
+title: "Bioestadística práctica en Ciencias de la salud"
+author: "Rafa García Carretero"
+date: "2024-06-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introducción
+
+Cargamos las librerías que vamos a usar más adelante
+
+```{r, warning = FALSE, message = FALSE}
+library(dplyr) #Para el tidyverso
+library(gtsummary) #para las tablas tipo ggplot
+library(Hmisc) #para añadir "labels" o etiquetas a las variables
+library(tableone) #para crear tablas en modo de texto
+# librerías para el 
+# análisis de supervivencia:
+library(survival)
+library(ggsurvfit)
+library(survminer)
+```
+
+Establecemos el directorio de trabajo y cargamos los datos en formato CSV. 
+
+```{r}
+#setwd("~/Documentos/Curso_Estadística_Mostoles/Clase_2")
+setwd("~/Python_Projects/Curso_Bioestadistica")
+pacientes <- read.table("estudio301.csv", header=TRUE, sep="&")
+```
+
+Como los datos están importados desde un CSV y no desde un archivo XLSX, hay que realizar ciertas modificaciones: establecer las clases de las variables, establecer las etiquetas, etc.
+
+```{r}
+pacientes$tratamiento <- as.factor(pacientes$tratamiento)
+pacientes$DiseaseLo <- as.factor(pacientes$DiseaseLo)
+pacientes$muerto <- as.factor(pacientes$muerto)
+pacientes$recaida <- as.factor(pacientes$recaida)
+label(pacientes$EDAD) <- "Edad"
+label(pacientes$DiseaseLo) <- "Localización de la enfermedad"
+label(pacientes$BPI) <- "Escala de dolor BPI"
+label(pacientes$C_ECOG) <- "Escala ECOG basal"
+label(pacientes$TRATprevio) <- "N. de tratamiento previos"
+label(pacientes$Visceral) <- "Enf. viceral"
+label(pacientes$race) <- "Raza"
+label(pacientes$muerto) <- "Muertes"
+label(pacientes$recaida) <- "Recaída"
+levels(pacientes$DiseaseLo)=c("Hueso","Node","Hígado")
+levels(pacientes$tratamiento)=c("Placebo","Abiraterona")
+levels(pacientes$muerto)=c("Vivo","Fallecido")
+levels(pacientes$recaida)=c("No recaída","Recaída")
+```
+
+## Creación de la tabla 1 con __tableone__
+
+### Tabla 1 (primer intento)
+
+Este primer intento usa todas las variables. Es la manera más sencilla porque sólo hay que hacer una llamada al _dataframe_. 
+
+```{r}
+tab1 <- CreateTableOne(data = pacientes)
+print(tab1, varLabels = TRUE) 
+```
+
+### Tabla 1 (segundo intento)
+
+En el segundo intento lo que se hace es elegir las variables que vamos a utilizar, y la __estratificamos__ los datos en dos cohortes según el tipo de tratamiento.
+```{r}
+
+## Get variables names
+#dput(names(pacientes))
+
+myVars <- c("EDAD", "DiseaseLo", "C_ECOG", "BPI", 
+            "TRATprevio", "Visceral", "race", "recaida" ,"muerto")
+## Vector of categorical variables that need transformation
+catVars <- c("DiseaseLo", "C_ECOG", "TRATprevio", "race", 
+             "tratamiento", "muerto")
+## Create a TableOne object
+tab2 <- CreateTableOne(vars = myVars, 
+                       data = pacientes, 
+                       factorVars = catVars,
+                       strata = "tratamiento")
+                       
+print(tab2, varLabels = TRUE) 
+```
+
+### Tabla 1 (tercer intento)
+
+El tercer intento es usar la librería __gtsummary__. El resultado es muy visual, pero una vez más, se usan todas las variables, y sin procesar.
+
+```{r}
+pacientes %>% tbl_summary()
+```
+### Tabla 1 (cuarto intento)
+
+Este intento es el __ganador__. Elegimos las variables y controlamos ciertos aspectos estéticos de la tabla. La salida queda muy bien en el HTML generado porque se integra perfectamente con la estética del documento (la salida en texto de __tableone__ también se puede sacar a un archivo texto y luego importarlo desde un documento de Word).
+
+```{r}
+pacientes %>%
+  select(tratamiento, EDAD, DiseaseLo, BPI, C_ECOG, 
+         TRATprevio, Visceral, race,muerto,recaida) %>%
+  
+  tbl_summary(by = tratamiento,
+              value = list(muerto ~ "Fallecido",
+                           recaida ~ "Recaída"),
+              label = list(EDAD ~ "Edad",
+                           DiseaseLo ~ "Localización de la enfermedad",
+                           BPI ~ "Escala de dolor BPI",
+                           C_ECOG ~ "Escala ECOG basal", 
+                           TRATprevio ~ "N. de tratamiento previos", 
+                           Visceral ~ "Enf. viceral", 
+                           race ~ "Raza"),
+              missing = "no",
+              missing_text = NULL,
+              percent="row") %>%
+  add_p(pvalue_fun = ~ style_pvalue(.x, digits = 2)) %>%
+  add_overall() %>%
+  modify_footnote(
+    all_stat_cols() ~ "Medidas expresadas en Mediana (RIQ) o Frecuencia (%)"
+  ) %>%
+  #add_n() %>%
+  modify_caption("**Tabla 1. Características de la cohorte**") %>%
+  modify_header(label ~ "**Variable**") %>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Tipo de Tratamiento**") %>%
+  bold_labels() %>%
+  italicize_levels() %>%
+  bold_p(t = 0.05)
+```
+## Análisis de supervivencia
+
+### Curva de Kaplan-Meier global (I)
+
+Con el primer estimador calculamos la __supervivencia global__ de toda la cohorte en función del _tratamiento_. Usamos sólo el _tiempo_ y la _mortalidad_.
+
+```{r}
+#las variables "muerto" y "recaida" tienen que volver a ser
+# números, porque si no, el análisis de supervivencia no sale
+pacientes$muerto <- as.numeric(pacientes$muerto)
+pacientes$recaida <- as.numeric(pacientes$recaida)
+```
+
+
+```{r}
+#km_fit <- survfit(Surv(time_Global, muerto) ~ 1, data=pacientes)
+km_fit <- survfit(Surv(time_Global, muerto) ~ tratamiento, data=pacientes)
+
+curva_1 <- ggsurvplot(km_fit, 
+                      data = pacientes, 
+                      risk.table = TRUE, 
+                      conf.int = TRUE,
+                      pval=TRUE,
+                      surv.median.line = "hv", # Specify median survival
+                      ggtheme = theme_bw(),
+                      legend = c("bottom"),
+                      title = "Curva de Kaplan-Meier - Supervivencia global \n (Abiraterona vs Placebo)",
+                      xlab = "Tiempo (meses)",
+                      ylab = "Supervivencia (probabilidad)",
+                      risk.table.title="Pacientes en riesgo",
+                      censor = FALSE
+)
+curva_1$plot + 
+  theme_bw() +
+  scale_linetype_manual(values = c("solid","dashed", "solid", "dotted", "dotdash")) +
+  scale_colour_manual(values = c("steelblue","red","red","red")) +
+  labs(title = "Curva de Kaplan-Meier",
+       subtitle="Supervivencia libre de enfermedad (Abiraterona vs Placebo)")+  
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="bottom") +
+  theme(legend.title = element_blank()) +
+  theme(panel.background = element_rect(colour = "black"),
+        axis.text=element_text(size=8),  #tamaño de las fechas
+        axis.title.x = element_text(vjust=-0.2),
+        axis.title.y = element_text(vjust=+0.6),
+        axis.title=element_text(size=10,face="bold"), #tamaño de los títulos de los ejes
+        plot.title = element_text(size = 11, hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(size = 9, hjust = 0.5, color = "grey40"),
+        plot.caption = element_text(size = 7.5, color = "grey40"))
+```
+
+### Curva de Kaplan-Meier global (II)
+
+Ahora calculamos el estimador de K-M en función del _tratamiento_ para estimar el __tiempo libre de enfermedad__.
+
+```{r}
+km_fit <- survfit(Surv(time_f, recaida) ~ tratamiento, data=pacientes)
+
+curva_2 <- ggsurvplot(km_fit, 
+                      data = pacientes, 
+                      risk.table = TRUE, 
+                      conf.int = TRUE,
+                      pval=TRUE,
+                      surv.median.line = "hv", # Specify median survival
+                      ggtheme = theme_bw(),
+                      legend = c("bottom"),
+                      xlab = "Tiempo (meses)",
+                      ylab = "Supervivencia (probabilidad)",
+                      risk.table.title="Pacientes en riesgo",
+                      censor = FALSE
+                      )
+curva_2$plot + 
+  theme_bw() +
+  scale_linetype_manual(values = c("solid","dashed", "solid", "dotted", "dotdash")) +
+  scale_colour_manual(values = c("#2E9FDF","#E7B800","steelblue","red","red","red")) +
+  labs(title = "Curva de Kaplan-Meier",
+       subtitle="Supervivencia global (Abiraterona vs Placebo)")+  
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="bottom") +
+  theme(legend.title = element_blank()) +
+  theme(panel.background = element_rect(colour = "black"),
+        axis.text=element_text(size=8),  #tamaño de las fechas
+        axis.title.x = element_text(vjust=-0.2),
+        axis.title.y = element_text(vjust=+0.6),
+        axis.title=element_text(size=10,face="bold"), #tamaño de los títulos de los ejes
+        plot.title = element_text(size = 11, hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(size = 9, hjust = 0.5, color = "grey40"),
+        plot.caption = element_text(size = 7.5, color = "grey40"))
+```
+
+## Regresión de Cox (sin ajustar)
+
+Vuelvo a utilizar la librería _gtsummary_ para mostrar los resultados en una tabla. Esta librería permite unir dos modelos de regresión, en este caso, el de la __mortalidad__ y el de __recaída__.
+
+La variable _Placebo_ es el valor de referencia.
+
+```{r}
+#https://www.danieldsjoberg.com/gtsummary/
+cox.clasico.1 <- coxph(Surv(time_Global, muerto)~ tratamiento, 
+                     data = pacientes,na.action=na.exclude) #MORTALIDAD
+cox.clasico.2 <- coxph(Surv(time_f, recaida)~ tratamiento, 
+                       data = pacientes,na.action=na.exclude) #RECAIDA
+
+t1 <- tbl_regression(cox.clasico.1, exponentiate = TRUE) %>%
+  add_n()
+
+t2 <- tbl_regression(cox.clasico.2, exponentiate = TRUE) %>%
+  add_n()
+
+# merge tables
+tbl_merge_ex1 <-
+  tbl_merge(
+    tbls = list(t1, t2),
+    tab_spanner = c("**Supervivencia global**", "**Tiempo libre de enfermedad**")
+  ) %>%
+  modify_caption("**Tabla 2. Hazard Ratios**") %>%
+  modify_header(label = "**Variable**") %>% # update the column header
+  bold_labels() %>%
+  italicize_levels()
+tbl_merge_ex1
+```
+
+## Regresión de Cox (estimadores ajustados)
+
+```{r}
+cox.clasico.3 <- coxph(Surv(time_Global, muerto)~ tratamiento + C_ECOG + BPI, 
+                       data = pacientes,na.action=na.exclude)
+
+t3 <- tbl_regression(cox.clasico.3, exponentiate = TRUE) %>%
+  add_n() %>%
+  modify_caption("**Tabla 3. Hazard Ratios Ajustados**") %>%
+  modify_header(label = "**Variable**") %>% # update the column header
+  bold_labels() %>%
+  italicize_levels()
+t3
+```
+
+## Supervivencia
+
+```{r}
+#######################################
+#                                     #
+# PROBABILIDAD DE SUPERVIVENCIA       #
+#                                     #
+#######################################
+#
+pacientes$trt.libre <- pacientes$tratamiento
+pacientes$trt.global <- pacientes$tratamiento
+label(pacientes$trt.libre) <- "Libre de enfermedad"
+label(pacientes$trt.global) <- "Global"
+
+tbl_survfit_ex1 <- 
+  list(
+    survfit(Surv(time_Global, muerto) ~ trt.global, pacientes),
+    survfit(Surv(time_f, recaida) ~ trt.libre, pacientes)
+  ) %>%
+  tbl_survfit(
+  times = c(6, 12),
+  label_header = "**Mes {time}**"
+) %>% 
+  #add_p() %>%
+  bold_labels() %>%
+  modify_header(label ~ "**Supervivencia**") %>%
+  italicize_levels()
+tbl_survfit_ex1
+
+```
+
+## Regresión logística y tabla con las muertes separada por tratamientos
+
+```{r}
+#######################################
+#                                     #
+# REGRESION LOGISTICA                 #
+#                                     #
+#######################################
+#
+# 0 – Vivo
+# 1 - Muerto
+# Hay que volver a pasar la variable "muerto" a numérico para
+# que se pueda usar en la regresión logística.
+pacientes$muerto[pacientes$muerto==1] <- 0
+pacientes$muerto[pacientes$muerto==2] <- 1
+
+# build logistic regression model
+model1 <- glm(muerto ~ tratamiento, pacientes, family = binomial)
+tbl_regression(model1, exponentiate = TRUE)
+
+table(pacientes$muerto, pacientes$tratamiento)
+```
+
